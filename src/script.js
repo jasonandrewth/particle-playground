@@ -134,10 +134,13 @@ window.addEventListener("mousemove", (e) => {
 
 window.addEventListener("touchstart", (e) => {
   isAnimating = true;
+  gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence.value = 0.7;
 });
 
 window.addEventListener("touchend", (e) => {
   isAnimating = false;
+  gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence.value =
+    debugObject.flowFieldInfluence;
 });
 
 /**
