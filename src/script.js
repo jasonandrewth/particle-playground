@@ -98,7 +98,7 @@ const dummy = new THREE.Mesh(
 );
 scene.add(dummy);
 
-window.addEventListener("pointermove", (e) => {
+window.addEventListener("mousemove", (e) => {
   pointer.x = (e.clientX / sizes.width) * 2 - 1;
   pointer.y = -(e.clientY / sizes.height) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
@@ -132,6 +132,14 @@ window.addEventListener("pointermove", (e) => {
   }
 });
 
+window.addEventListener("touchstart", (e) => {
+  isAnimating = true;
+});
+
+window.addEventListener("touchend", (e) => {
+  isAnimating = false;
+});
+
 /**
  * Camera
  */
@@ -160,7 +168,7 @@ const renderer = new THREE.WebGLRenderer({
 renderer.setSize(sizes.width, sizes.height);
 renderer.setPixelRatio(sizes.pixelRatio);
 
-debugObject.clearColor = "#29191f";
+debugObject.clearColor = "#000000";
 renderer.setClearColor(debugObject.clearColor);
 
 /**
@@ -409,7 +417,7 @@ particles.material = new THREE.ShaderMaterial({
   vertexShader: particlesVertexShader,
   fragmentShader: particlesFragmentShader,
   uniforms: {
-    uSize: new THREE.Uniform(0.08),
+    uSize: new THREE.Uniform(0.05),
     uColor: new THREE.Uniform(new THREE.Color(0xffffff)),
     uResolution: new THREE.Uniform(
       new THREE.Vector2(
