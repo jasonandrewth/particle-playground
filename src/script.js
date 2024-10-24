@@ -4,11 +4,20 @@ import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { DRACOLoader } from "three/addons/loaders/DRACOLoader.js";
 import GUI from "lil-gui";
 import { GPUComputationRenderer } from "three/addons/misc/GPUComputationRenderer.js";
-import { MeshSurfaceSampler } from "three/addons/math/MeshSurfaceSampler.js";
 
 import particlesVertexShader from "./shaders/particles/vertex.glsl";
 import particlesFragmentShader from "./shaders/particles/fragment.glsl";
-import baseParticlesCompute from "./shaders/gpgpu/particles.glsl";
+import baseParticlesPosCompute from "./shaders/gpgpu/particlesPos.glsl";
+import baseParticlesVelCompute from "./shaders/gpgpu/particlesVel.glsl";
+
+function movePointAlongDirection(point, direction, distance) {
+  const normalizedDirection = direction.clone().normalize(); // Normalize the direction vector
+  const movedPoint = point
+    .clone()
+    .add(normalizedDirection.multiplyScalar(distance)); // Move point
+
+  return movedPoint;
+}
 
 /**
  * Base
@@ -16,6 +25,9 @@ import baseParticlesCompute from "./shaders/gpgpu/particles.glsl";
 // Debug
 const gui = new GUI({ width: 340 });
 const debugObject = {};
+debugObject.color = "#ffffff";
+debugObject.isAnimating = false;
+debugObject.flowFieldInfluence = 0.2;
 
 // Canvas
 const canvas = document.querySelector("canvas.webgl");
@@ -25,7 +37,7 @@ const scene = new THREE.Scene();
 
 // Loaders
 const textureLoader = new THREE.TextureLoader();
-const texture = textureLoader.load("./particles/4.png");
+const texture = textureLoader.load("./particles/1.png");
 texture.flipY = false;
 
 const dracoLoader = new DRACOLoader();
@@ -33,7 +45,15 @@ dracoLoader.setDecoderPath("/draco/");
 
 const gltfLoader = new GLTFLoader();
 gltfLoader.setDRACOLoader(dracoLoader);
+// Mouse
+let isAnimating = false;
+const raycaster = new THREE.Raycaster();
+raycaster.params.Mesh = { threshold: 4 };
+const pointer = new THREE.Vector3();
 
+// Quaternion rotation stuff
+const targetQuaternion = new THREE.Quaternion(); // This will be the identity quaternion when stopping
+const quaternionIncrement = new THREE.Quaternion(); // Will store incremental rotations
 /**
  * Sizes
  */
@@ -65,6 +85,54 @@ window.addEventListener("resize", () => {
 });
 
 /**
+ * Mouse
+ */
+const meshGeo = new THREE.SphereGeometry(2.6, 32, 32);
+meshGeo.scale(1, 1, 1);
+const raycasterMesh = new THREE.Mesh(meshGeo, new THREE.MeshBasicMaterial());
+// scene.add(raycasterMesh);
+
+const dummy = new THREE.Mesh(
+  new THREE.SphereGeometry(0.06, 32, 32),
+  new THREE.MeshNormalMaterial()
+);
+scene.add(dummy);
+
+window.addEventListener("pointermove", (e) => {
+  pointer.x = (e.clientX / sizes.width) * 2 - 1;
+  pointer.y = -(e.clientY / sizes.height) * 2 + 1;
+  raycaster.setFromCamera(pointer, camera);
+
+  const intersects = raycaster.intersectObject(raycasterMesh, false);
+  if (intersects.length > 0) {
+    const mirrorPoint = movePointAlongDirection(
+      intersects[0].point,
+      raycaster.ray.direction,
+      4
+    );
+    isAnimating = true;
+    console.log(intersects[0].point, mirrorPoint);
+    dummy.position.copy(intersects[0].point);
+    // this.simMaterial.uniforms.uMouse.value = intersects[0].point;
+    // this.positionUniforms.uMouse.value = intersects[0].point;
+    gpgpu.particlesVelVariable.material.uniforms.uMouse.value =
+      intersects[0].point;
+
+    gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence.value = 0.7;
+  } else {
+    gpgpu.particlesVelVariable.material.uniforms.uMouse.value =
+      new THREE.Vector3(0);
+    gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence.value =
+      debugObject.flowFieldInfluence;
+    dummy.position.copy(
+      gpgpu.particlesVelVariable.material.uniforms.uMouse.value
+    );
+
+    isAnimating = false;
+  }
+});
+
+/**
  * Camera
  */
 // Base camera
@@ -79,6 +147,7 @@ scene.add(camera);
 
 // Controls
 const controls = new OrbitControls(camera, canvas);
+controls.maxPolarAngle = Math.PI;
 controls.enableDamping = true;
 
 /**
@@ -93,56 +162,44 @@ renderer.setPixelRatio(sizes.pixelRatio);
 
 debugObject.clearColor = "#29191f";
 renderer.setClearColor(debugObject.clearColor);
-debugObject.isAnimating = false;
+
 /**
  * Load Model
  */
-const gltf = await gltfLoader.loadAsync("./model.glb");
-console.log(gltf);
+const gltf = await gltfLoader.loadAsync("./cubelogocenterglobal.glb");
+const outer = gltf.scene.children[0];
+// outer.scale.set(0.2, 0.2, 0.2);
+const inner = outer.children[1];
+
+const testMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+const ambient = new THREE.AmbientLight(0xffffff, 1);
+
+scene.add(ambient);
+
+outer.traverse((child) => {
+  if (child.isMesh) {
+    console.log(child.material.color);
+    child.material = testMat;
+  }
+});
+scene.add(outer);
 
 /**
  * Base Geometry
  */
 const baseGeometry = {};
-baseGeometry.instance = gltf.scene.children[0].geometry;
-baseGeometry.vertexCount = baseGeometry.instance.attributes.position.count;
-
-/**
- * Ellipses
- */
-// Create Circle Geometry and scale it to make an ellipse
-const geometry = new THREE.RingGeometry(2.45, 2.5, 64);
-geometry.scale(1, 0.5, 1); // Scale it along the Y-axis to make it elliptical
-
-// Create a white material
-const ellipseMaterial = new THREE.MeshBasicMaterial({
-  color: 0xffffff,
-  side: THREE.DoubleSide,
-}); // White color
-
-// Create a mesh with the elliptical geometry and the white material
-const ellipseCenter = new THREE.Mesh(geometry, ellipseMaterial);
-const ellipseTop = new THREE.Mesh(geometry, ellipseMaterial);
-ellipseTop.position.y = 1.25;
-ellipseTop.scale.x = 0.6;
-const ellipseBottom = new THREE.Mesh(geometry, ellipseMaterial);
-ellipseBottom.position.y = -1.25;
-ellipseBottom.scale.x = 0.6;
-scene.add(ellipseCenter);
-scene.add(ellipseTop);
-scene.add(ellipseBottom);
 
 /**
  * GPU Compute
  */
 
 // Sizes for data tex
-const size = 100;
+const size = 128;
 const particlesCount = size * size;
 
 let mainR = 2.5;
-let outerLimit = 0.08;
-let innerLimit = 0.08;
+let outerLimit = 1.8;
+let innerLimit = 0.8;
 
 const gpgpu = {};
 gpgpu.size = size;
@@ -155,7 +212,30 @@ gpgpu.computation = new GPUComputationRenderer(
 
 // Create initial state float textures
 // Base particles
-const baseParticlesTex = gpgpu.computation.createTexture();
+//Position Data Texture
+const baseParticlesPosTex = gpgpu.computation.createTexture();
+
+const radius = 2.6;
+for (let i = 0; i < particlesCount; i++) {
+  //Stride
+  const i3 = i * 3;
+  const i4 = i * 4;
+
+  //generate points on a sphere
+  let theta = Math.random() * Math.PI * 2;
+  let phi = Math.acos(Math.random() * 2 - 1); //between 0 and pi
+
+  let x = Math.sin(phi) * Math.cos(theta) * radius;
+  let y = Math.sin(phi) * Math.sin(theta) * radius;
+  let z = Math.cos(phi) * radius;
+
+  // pos.z *= 0.5;
+
+  baseParticlesPosTex.image.data[i4] = x;
+  baseParticlesPosTex.image.data[i4 + 1] = y;
+  baseParticlesPosTex.image.data[i4 + 2] = z;
+  baseParticlesPosTex.image.data[i4 + 3] = Math.random();
+}
 
 const positions = new Float32Array(particlesCount * 0.5 * 3);
 const outerRingGeo = new THREE.BufferGeometry();
@@ -196,46 +276,45 @@ const outerRingMaterial = new THREE.PointsMaterial({
   sizeAttenuation: true,
   transparent: true,
   blendAlpha: true,
-  depthWrite: false,
+  // depthWrite: false,
   alphaMap: texture,
 });
 const outerRingPoints = new THREE.Points(outerRingGeo, outerRingMaterial);
-scene.add(outerRingPoints);
+// scene.add(outerRingPoints);
 
-//Diamond Test
-const octahedronGeometry = new THREE.OctahedronGeometry(2.5, 0);
-octahedronGeometry.scale(0.5, 0.7, 0.5);
-const octaTest = new THREE.Mesh(octahedronGeometry, ellipseMaterial);
-
-const surfaceSampler = new MeshSurfaceSampler(octaTest).build();
-const posOct = new THREE.Vector3();
-// TES TEST
+//Velocity Data Texture
+const baseParticlesVelTex = gpgpu.computation.createTexture();
+//Init empty i guess
 for (let i = 0; i < particlesCount; i++) {
   //Stride
-  const i3 = i * 3;
   const i4 = i * 4;
 
-  surfaceSampler.sample(posOct);
-
-  //Position based on geometry
-  baseParticlesTex.image.data[i4 + 0] = posOct.x;
-  baseParticlesTex.image.data[i4 + 1] = posOct.y;
-  baseParticlesTex.image.data[i4 + 2] = posOct.z;
-  //Start alha at random (life start)
-  baseParticlesTex.image.data[i4 + 3] = Math.random();
+  baseParticlesVelTex.image.data[i4] = 0;
+  baseParticlesVelTex.image.data[i4 + 1] = 0;
+  baseParticlesVelTex.image.data[i4 + 2] = 0;
+  baseParticlesVelTex.image.data[i4 + 3] = 0;
 }
-
 // Add texture variables
 gpgpu.particlesVariable = gpgpu.computation.addVariable(
-  "uParticles",
-  baseParticlesCompute,
-  baseParticlesTex
+  "uParticlesPos",
+  baseParticlesPosCompute,
+  baseParticlesPosTex
+);
+gpgpu.particlesVelVariable = gpgpu.computation.addVariable(
+  "uParticlesVel",
+  baseParticlesVelCompute,
+  baseParticlesVelTex
 );
 // Set variable dependencies
 gpgpu.computation.setVariableDependencies(gpgpu.particlesVariable, [
   gpgpu.particlesVariable,
+  gpgpu.particlesVelVariable,
 ]);
-//Uniforms
+gpgpu.computation.setVariableDependencies(gpgpu.particlesVelVariable, [
+  gpgpu.particlesVariable,
+  gpgpu.particlesVelVariable,
+]);
+//Uniforms Pos
 gpgpu.particlesVariable.material.uniforms.uTime = new THREE.Uniform(0);
 gpgpu.particlesVariable.material.uniforms.uDeltaTime = new THREE.Uniform(0);
 gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence =
@@ -246,9 +325,28 @@ gpgpu.particlesVariable.material.uniforms.uFlowFieldFrequency =
   new THREE.Uniform(0.5);
 
 gpgpu.particlesVariable.material.uniforms.uBaseTexture = new THREE.Uniform(
-  baseParticlesTex
+  baseParticlesPosTex
 );
-console.log(gpgpu.particlesVariable.material.uniforms);
+
+//Uniforms Vel
+gpgpu.particlesVelVariable.material.uniforms.uTime = new THREE.Uniform(0);
+gpgpu.particlesVelVariable.material.uniforms.uDeltaTime = new THREE.Uniform(0);
+gpgpu.particlesVelVariable.material.uniforms.uFlowFieldInfluence =
+  new THREE.Uniform(0.2);
+gpgpu.particlesVelVariable.material.uniforms.uFlowFieldStrength =
+  new THREE.Uniform(0.7);
+gpgpu.particlesVelVariable.material.uniforms.uFlowFieldFrequency =
+  new THREE.Uniform(0.5);
+gpgpu.particlesVelVariable.material.uniforms.uMouse = new THREE.Uniform(
+  new THREE.Vector3(0, 0, 0)
+);
+gpgpu.particlesVelVariable.material.uniforms.uMouseStrength = new THREE.Uniform(
+  0.5
+);
+gpgpu.particlesVelVariable.material.uniforms.uBaseTexture = new THREE.Uniform(
+  baseParticlesPosTex
+);
+console.log(gpgpu.particlesVelVariable.material.uniforms);
 // Init
 gpgpu.computation.init();
 
@@ -257,14 +355,14 @@ gpgpu.debug = new THREE.Mesh(
   new THREE.PlaneGeometry(3, 3),
   new THREE.MeshBasicMaterial({
     //Get the off screen texture
-    map: gpgpu.computation.getCurrentRenderTarget(gpgpu.particlesVariable)
+    map: gpgpu.computation.getCurrentRenderTarget(gpgpu.particlesVelVariable)
       .texture,
     transparent: true,
   })
 );
 
 gpgpu.debug.position.x = 5;
-// scene.add(gpgpu.debug);
+scene.add(gpgpu.debug);
 
 /**
  * Particles
@@ -311,7 +409,7 @@ particles.material = new THREE.ShaderMaterial({
   vertexShader: particlesVertexShader,
   fragmentShader: particlesFragmentShader,
   uniforms: {
-    uSize: new THREE.Uniform(0.025),
+    uSize: new THREE.Uniform(0.08),
     uColor: new THREE.Uniform(new THREE.Color(0xffffff)),
     uResolution: new THREE.Uniform(
       new THREE.Vector2(
@@ -325,7 +423,7 @@ particles.material = new THREE.ShaderMaterial({
   side: THREE.DoubleSide,
   transparent: true,
   depthWrite: false,
-  blending: THREE.AdditiveBlending,
+  // blending: THREE.AdditiveBlending,
 });
 
 // Points
@@ -350,16 +448,31 @@ gui
   .name("particlesColor")
   .onChange((v) => {
     console.log(v, particles.material.uniforms.uColor.value);
-    ellipseCenter.material.color = v;
-    outerRingMaterial.color = v;
+  });
+gui
+  .addColor(debugObject, "color")
+  .name("logoColor")
+  .onChange((v) => {
+    testMat.color.set(v);
   });
 
 gui
-  .add(gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence, "value")
+  .add(gpgpu.particlesVelVariable.material.uniforms.uMouseStrength, "value")
   .min(0)
   .max(1)
   .step(0.001)
-  .name("uFlowFieldInfluence");
+  .name("mouseStrength");
+
+gui
+  .add(debugObject, "flowFieldInfluence")
+  .min(0)
+  .max(1)
+  .step(0.001)
+  .name("uFlowFieldInfluence")
+  .onChange(
+    (v) =>
+      (gpgpu.particlesVariable.material.uniforms.uFlowFieldInfluence.value = v)
+  );
 gui
   .add(gpgpu.particlesVariable.material.uniforms.uFlowFieldStrength, "value")
   .min(0)
@@ -372,9 +485,15 @@ gui
   .max(1)
   .step(0.001)
   .name("uFlowFieldFrequency");
+
 /**
  * Animate
  */
+const transitionSpeed = 0.05;
+const rotationAxisY = new THREE.Vector3(0, 1, 0); // Rotate around the Y-axis
+const rotationAxisX = new THREE.Vector3(1, 0, 0); // Rotate around the Y-axis
+const rotationSpeed = 0.005; // Rotation speed per frame
+
 const clock = new THREE.Clock();
 let previousTime = 0;
 
@@ -387,19 +506,37 @@ const tick = () => {
   // Update controls
   controls.update();
 
-  if (debugObject.isAnimating) {
-    particles.points.rotation.y = elapsedTime * 0.25;
-    ellipseCenter.rotation.x = elapsedTime * 0.25;
-    ellipseBottom.rotation.y = elapsedTime * 0.25;
-    ellipseTop.rotation.y = elapsedTime * -0.25;
-
-    outerRingPoints.rotation.y = elapsedTime * 0.25;
-    outerRingPoints.rotation.x = elapsedTime * -0.25;
+  if (isAnimating) {
+    quaternionIncrement.setFromAxisAngle(rotationAxisY, rotationSpeed);
+    outer.quaternion.multiplyQuaternions(quaternionIncrement, outer.quaternion);
+    //X Rotation
+    quaternionIncrement.setFromAxisAngle(rotationAxisX, rotationSpeed);
+    inner.children[0].quaternion.multiplyQuaternions(
+      quaternionIncrement,
+      inner.children[0].quaternion
+    );
+    inner.children[1].quaternion.multiplyQuaternions(
+      quaternionIncrement,
+      inner.children[1].quaternion
+    );
+    inner.children[3].quaternion.multiplyQuaternions(
+      quaternionIncrement,
+      inner.children[3].quaternion
+    );
+  } else {
+    outer.quaternion.slerp(targetQuaternion, transitionSpeed);
+    inner.children[0].quaternion.slerp(targetQuaternion, transitionSpeed);
+    inner.children[1].quaternion.slerp(targetQuaternion, transitionSpeed);
+    inner.children[3].quaternion.slerp(targetQuaternion, transitionSpeed);
   }
 
   // Update GPGPU
   gpgpu.particlesVariable.material.uniforms.uTime.value = elapsedTime;
   gpgpu.particlesVariable.material.uniforms.uDeltaTime.value = deltaTime;
+  gpgpu.particlesVelVariable.material.uniforms.uTime.value = elapsedTime;
+  gpgpu.particlesVelVariable.material.uniforms.uDeltaTime.value = deltaTime;
+
+  // console.log(gpgpu.particlesVelVariable.material.uniforms.uDeltaTime.value);
 
   gpgpu.computation.compute();
   particles.material.uniforms.uParticlesTexture.value =

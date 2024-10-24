@@ -12,15 +12,17 @@ void main() {
 
     float time = uTime * 0.2;
     vec2 uv = gl_FragCoord.xy / resolution.xy;
-    vec4 particle = texture(uParticles, uv);
+    vec4 particle = texture(uParticlesPos, uv);
     vec4 initialPosition = texture(uBaseTexture, uv);
+
+    vec3 velocity = texture2D(uParticlesVel, uv).xyz;
 
     if(particle.a >= 1.0) {
 //clamping in 0-1 range but back to the right decimal value
         particle.a = fract(particle.a);
         particle.xyz = initialPosition.xyz;
     } else {
-        // Strength
+
         float strength = simplexNoise4d(vec4(initialPosition.xyz + 0.0, time + 1.0));
         float influence = (uFlowFieldInfluence - 0.5) * (-2.0);
         // remap from -1 1 to 0 1
@@ -32,11 +34,14 @@ void main() {
 
         particle.xyz += flowField * uDeltaTime * strength * uFlowFieldStrength;
 
+        particle.xyz += velocity;
+
     //Decay
         particle.a += uDeltaTime * 0.25;
     }
 
     // particle.xyz = initialPosition.xyz;
+    // particle.r += 0.1;
 
     gl_FragColor = particle;
 
